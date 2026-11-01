@@ -1,0 +1,207 @@
+#!/usr/bin/env nu
+
+# ctx: one editable document per concept.
+# State lives in .data/contexts.db and is never committed.
+
+def root [] { $env.FILE_PWD }
+
+def data-dir [] { root | path join ".data" }
+
+def db-path [] { data-dir | path join "contexts.db" }
+
+def today [] { date now | format date "%Y-%m-%d" }
+
+def fail [message: string] {
+  print --stderr $"ctx: ($message)"
+  exit 1
+}
+
+def ensure-db [] {
+  let dir = (data-dir)
+  let db = (db-path)
+  if not ($dir | path exists) { mkdir $dir }
+  if not ($db | path exists) {
+    [{ x: 0 }] | into sqlite $db
+    open $db | query db "drop table main" | ignore
+    open $db | query db "create table concepts (id integer primary key, slug text not null unique, title text not null, summary text not null, body text not null default '', created text not null, updated text not null)" | ignore
+    open $db | query db "create table revisions (id integer primary key, concept_id integer not null, body text not null, replaced_at text not null)" | ignore
+    open $db | query db "create virtual table concepts_fts using fts5 (title, summary, body, content='concepts', content_rowid='id', tokenize='porter')" | ignore
+    open $db | query db "create trigger concepts_ai after insert on concepts begin insert into concepts_fts (rowid, title, summary, body) values (new.id, new.title, new.summary, new.body); end" | ignore
+    open $db | query db "create trigger concepts_ad after delete on concepts begin insert into concepts_fts (concepts_fts, rowid, title, summary, body) values ('delete', old.id, old.title, old.summary, old.body); end" | ignore
+    open $db | query db "create trigger concepts_au after update on concepts begin insert into concepts_fts (concepts_fts, rowid, title, summary, body) values ('delete', old.id, old.title, old.summary, old.body); insert into concepts_fts (rowid, title, summary, body) values (new.id, new.title, new.summary, new.body); end" | ignore
+    open $db | query db "pragma journal_mode = wal" | ignore
+  }
+  $db
+}
+
+def concept [db: path, slug: string] {
+  let rows = (open $db | query db "select id, slug, title, summary, body from concepts where slug = ?1" --params [$slug])
+  if ($rows | is-empty) { fail $"no concept named ($slug)" }
+  $rows.0
+}
+
+def body-from [file: string] {
+  if not ($file | is-empty) {
+    if not ($file | path exists) { fail $"no such file: ($file)" }
+    return (open --raw $file | str trim)
+  }
+  let piped = (^cat | str trim)
+  if ($piped | is-empty) { fail "empty body; pass --file <path> or pipe text on stdin" }
+  $piped
+}
+
+def plural [n: int] { if $n == 1 { "concept" } else { "concepts" } }
+
+def write-map [db: path] {
+  let concepts = (open $db | query db "select slug, summary from concepts order by slug")
+  let lines = ($concepts | each {|c| $"- **($c.slug)**. ($c.summary)" })
+  let list = (if ($lines | is-empty) { "(no concepts yet)" } else { $lines | str join "\n" })
+  let text = $"# Contexts\n\nPersonal contexts. Each concept is one editable document.\n\n## Concepts\n\n($list)\n\n## How to use\n\n- When a request touches any concept above, run `./ctx read <slug> [<slug> ...]` before answering. Read every concept that could matter, not just the first.\n- Answer from the text you read. If a detail is missing, say so instead of guessing.\n- `./ctx write <slug> --file <path>` replaces the whole document; piping the text on stdin works too. Read it first, then write the complete updated text. Never write a partial body.\n- Keep each document concise. Merge repeated points, correct what changed, and delete what is no longer true. Do not let a document grow by accretion.\n- `./ctx edit <slug> --title <t> --summary <s>` changes the line shown above. `./ctx new <slug> --title <t> --summary <s>` adds a concept.\n- `./ctx search <terms>` searches every document. `./ctx list` shows the same list as above. `./ctx history <slug>` shows earlier versions.\n"
+  $text | save --force (root | path join "AGENTS.md")
+  $concepts | length
+}
+
+def "main init" [] {
+  let db = (ensure-db)
+  print $"database: ($db)"
+  main sync
+}
+
+def "main new" [
+  slug: string
+  --title: string = ""
+  --summary: string = ""
+  --file: string = ""
+] {
+  let db = (ensure-db)
+  if ($title | is-empty) { fail "--title is required" }
+  if ($summary | is-empty) { fail "--summary is required" }
+  if not ($slug =~ '^[a-z0-9][a-z0-9-]*$') { fail "slug must be lowercase letters, digits and hyphens" }
+  let body = (if ($file | is-empty) { "" } else { body-from $file })
+  let stamp = (today)
+  open $db | query db "insert into concepts (slug, title, summary, body, created, updated) values (?1, ?2, ?3, ?4, ?5, ?5)" --params [$slug $title $summary $body $stamp] | ignore
+  print $"created ($slug)"
+  write-map $db | ignore
+}
+
+def "main edit" [
+  slug: string
+  --title: string = ""
+  --summary: string = ""
+] {
+  let db = (ensure-db)
+  let current = (concept $db $slug)
+  let next_title = (if ($title | is-empty) { $current.title } else { $title })
+  let next_summary = (if ($summary | is-empty) { $current.summary } else { $summary })
+  open $db | query db "update concepts set title = ?1, summary = ?2, updated = ?3 where id = ?4" --params [$next_title $next_summary (today) $current.id] | ignore
+  print $"updated ($slug)"
+  write-map $db | ignore
+}
+
+def "main read" [...slugs: string] {
+  let db = (ensure-db)
+  if ($slugs | is-empty) { fail "usage: ctx read <slug> [<slug> ...]" }
+  mut missing = false
+  for slug in $slugs {
+    let rows = (open $db | query db "select id, slug, title, summary, body from concepts where slug = ?1" --params [$slug])
+    if ($rows | is-empty) {
+      print $"unknown concept: ($slug)"
+      $missing = true
+      continue
+    }
+    let c = ($rows.0)
+    print ""
+    print $"== ($c.slug) =="
+    print $c.summary
+    print ""
+    if ($c.body | is-empty) { print "(empty)" } else { print $c.body }
+  }
+  if $missing { exit 1 }
+}
+
+def "main write" [
+  slug: string
+  --file: string = ""
+] {
+  let db = (ensure-db)
+  let current = (concept $db $slug)
+  let body = (body-from $file)
+  if not ($current.body | is-empty) {
+    open $db | query db "insert into revisions (concept_id, body, replaced_at) values (?1, ?2, ?3)" --params [$current.id $current.body (today)] | ignore
+  }
+  open $db | query db "update concepts set body = ?1, updated = ?2 where id = ?3" --params [$body (today) $current.id] | ignore
+  print $"wrote ($slug), ($body | str length) chars"
+}
+
+def "main history" [slug: string] {
+  let db = (ensure-db)
+  let current = (concept $db $slug)
+  let rows = (open $db | query db "select id, replaced_at, length(body) as chars from revisions where concept_id = ?1 order by id desc limit 20" --params [$current.id])
+  if ($rows | is-empty) { print "no earlier versions"; return }
+  for row in $rows { print $"rev ($row.id)  ($row.replaced_at)  ($row.chars) chars" }
+}
+
+def "main revert" [slug: string, rev: int] {
+  let db = (ensure-db)
+  let current = (concept $db $slug)
+  let rows = (open $db | query db "select body from revisions where id = ?1 and concept_id = ?2" --params [$rev $current.id])
+  if ($rows | is-empty) { fail $"no revision ($rev) for ($slug)" }
+  let body = ($rows.0.body)
+  open $db | query db "insert into revisions (concept_id, body, replaced_at) values (?1, ?2, ?3)" --params [$current.id $current.body (today)] | ignore
+  open $db | query db "update concepts set body = ?1, updated = ?2 where id = ?3" --params [$body (today) $current.id] | ignore
+  print $"reverted ($slug) to rev ($rev)"
+}
+
+def "main search" [...terms: string] {
+  let db = (ensure-db)
+  let query = ($terms | str join " " | split words | where {|word| ($word | str length) > 1 } | each {|word| $"\"($word)\"" } | str join " OR ")
+  if ($query | is-empty) { fail "usage: ctx search <terms>" }
+  let rows = (open $db | query db "select c.slug as slug, c.summary as summary, snippet(concepts_fts, 2, '[', ']', '...', 16) as part, bm25(concepts_fts) as score from concepts_fts join concepts c on c.id = concepts_fts.rowid where concepts_fts match ?1 order by score limit 10" --params [$query])
+  if ($rows | is-empty) { print "no matches"; return }
+  for row in $rows { print $"($row.slug)  ($row.part)" }
+}
+
+def "main list" [] {
+  let db = (ensure-db)
+  let rows = (open $db | query db "select slug, summary, length(body) as chars, updated from concepts order by slug")
+  if ($rows | is-empty) { print "no concepts yet"; return }
+  for row in $rows { print $"($row.slug)  ($row.chars) chars  updated ($row.updated)  ($row.summary)" }
+}
+
+def "main delete" [slug: string] {
+  let db = (ensure-db)
+  let current = (concept $db $slug)
+  open $db | query db "delete from revisions where concept_id = ?1" --params [$current.id] | ignore
+  open $db | query db "delete from concepts where id = ?1" --params [$current.id] | ignore
+  print $"deleted ($slug)"
+  write-map $db | ignore
+}
+
+def "main reindex" [] {
+  let db = (ensure-db)
+  open $db | query db "insert into concepts_fts (concepts_fts) values ('rebuild')" | ignore
+  print "reindexed"
+}
+
+def "main sync" [] {
+  let db = (ensure-db)
+  let count = (write-map $db)
+  print $"wrote AGENTS.md with ($count) (plural $count)"
+}
+
+def main [] {
+  print "ctx: one editable document per concept"
+  print ""
+  print "  ./ctx init"
+  print "  ./ctx new <slug> --title <t> --summary <s> [--file <path>]"
+  print "  ./ctx edit <slug> [--title <t>] [--summary <s>]"
+  print "  ./ctx read <slug> [<slug> ...]"
+  print "  ./ctx write <slug> --file <path>        # or pipe the body on stdin"
+  print "  ./ctx history <slug>"
+  print "  ./ctx revert <slug> <rev>"
+  print "  ./ctx search <terms>"
+  print "  ./ctx list"
+  print "  ./ctx delete <slug>"
+  print "  ./ctx reindex"
+  print "  ./ctx sync"
+}
