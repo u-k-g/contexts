@@ -25,6 +25,7 @@ That creates `.data/contexts.db` and writes `AGENTS.md`. Both are gitignored.
 ./ctx new <slug> --title <t> --summary <s>     # create a concept
 ./ctx edit <slug> [--title <t>] [--summary <s>]
 ./ctx read <slug> [<slug> ...]                 # full text of those concepts
+./ctx body <slug>                              # body only, safe to feed back to write
 ./ctx write <slug> --file <path>               # replace a document
 ./ctx history <slug>                           # earlier versions
 ./ctx revert <slug> <rev>                      # restore one

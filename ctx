@@ -55,13 +55,23 @@ def body-from [file: string]: nothing -> string {
   $piped
 }
 
+def strip-read-header [slug: string, text: string]: nothing -> string {
+  let lines = ($text | lines)
+  let header = $"== ($slug) =="
+  if (($lines | length) >= 3) and ($lines.0 == $header) and (($lines | get 2 | str trim) == "") {
+    $lines | skip 3 | str join "\n"
+  } else {
+    $text
+  }
+}
+
 def plural [n: int]: nothing -> string { if $n == 1 { "concept" } else { "concepts" } }
 
 def write-map [db: path]: nothing -> int {
   let concepts = (open $db | query db "select slug, summary from concepts order by slug")
   let lines = ($concepts | each {|c| $"- **($c.slug)**. ($c.summary)" })
   let list = (if ($lines | is-empty) { "(no concepts yet)" } else { $lines | str join "\n" })
-  let text = $"# Contexts\n\nPersonal contexts. Each concept is one editable document.\n\n## Concepts\n\n($list)\n\n## How to use\n\n- When a request touches any concept above, run `./ctx read <slug> [<slug> ...]` before answering. Read every concept that could matter, not just the first.\n- Answer from the text you read. If a detail is missing, say so instead of guessing.\n- After answering, if the conversation established a fact that will still be true next month, update the matching concept. Create one with `./ctx new` if none fits. Say which concept you updated.\n- Never store secrets, account numbers, TINs, one-off questions, or guesses.\n- `./ctx write <slug> --file <path>` replaces the whole document; piping the text on stdin works too. Read it first, then write the complete updated text. Never write a partial body.\n- Keep each document concise. Merge repeated points, correct what changed, and delete what is no longer true. Do not let a document grow by accretion.\n- `./ctx edit <slug> --title <t> --summary <s>` changes the line shown above. `./ctx new <slug> --title <t> --summary <s>` adds a concept.\n- `./ctx search <terms>` searches every document. `./ctx list` shows the same list as above. `./ctx history <slug>` shows earlier versions.\n"
+  let text = $"# Contexts\n\nPersonal contexts. Each concept is one editable document.\n\n## Concepts\n\n($list)\n\n## How to use\n\n- When a request touches any concept above, run `./ctx read <slug> [<slug> ...]` before answering. Read every concept that could matter, not just the first.\n- Answer from the text you read. If a detail is missing, say it is missing before answering from general knowledge.\n- After answering, if the conversation established a fact that will still be true next month, update the matching concept. Create one with `./ctx new` if none fits. Say which concept you updated.\n- Never store secrets, account numbers, TINs, one-off questions, or guesses.\n- To edit a concept, get its body with `./ctx body <slug>`, then send the complete revised text with `./ctx write <slug> --file <path>`. Piping on stdin works too. Never write a partial body.\n- `./ctx read` adds a header and summary for humans. Never pass its output to `write`; use `body` for that.\n- Keep each document concise. Merge repeated points, correct what changed, and delete what is no longer true. Do not let a document grow by accretion.\n- `./ctx edit <slug> --title <t> --summary <s>` changes the line shown above. `./ctx new <slug> --title <t> --summary <s>` adds a concept.\n- `./ctx search <terms>` searches every document. `./ctx list` shows the same list as above. `./ctx history <slug>` shows earlier versions.\n"
   $text | save --force (root | path join "AGENTS.md")
   $concepts | length
 }
@@ -130,12 +140,19 @@ def "main write" [
 ]: nothing -> nothing {
   let db = (ensure-db)
   let current = (concept $db $slug)
-  let body = (body-from $file)
+  let body = (strip-read-header $slug (body-from $file))
+  if ($body | is-empty) { fail "empty body after removing the read header" }
   if not ($current.body | is-empty) {
     open $db | query db "insert into revisions (concept_id, body, replaced_at) values (?1, ?2, ?3)" --params [$current.id $current.body (today)] | ignore
   }
   open $db | query db "update concepts set body = ?1, updated = ?2 where id = ?3" --params [$body (today) $current.id] | ignore
   print $"wrote ($slug), ($body | str length) chars"
+}
+
+def "main body" [slug: string]: nothing -> nothing {
+  let db = (ensure-db)
+  let current = (concept $db $slug)
+  print $current.body
 }
 
 def "main history" [slug: string]: nothing -> nothing {
@@ -201,6 +218,7 @@ def main []: nothing -> nothing {
   print "  ./ctx new <slug> --title <t> --summary <s> [--file <path>]"
   print "  ./ctx edit <slug> [--title <t>] [--summary <s>]"
   print "  ./ctx read <slug> [<slug> ...]"
+  print "  ./ctx body <slug>"
   print "  ./ctx write <slug> --file <path>        # or pipe the body on stdin"
   print "  ./ctx history <slug>"
   print "  ./ctx revert <slug> <rev>"
