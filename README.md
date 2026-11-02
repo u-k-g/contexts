@@ -43,6 +43,13 @@ That creates `.data/contexts.db` and writes `AGENTS.md`. Both are gitignored.
 
 It replaces the whole document and saves the previous text as a revision.
 
+## Why nushell
+
+One file, no build step, and no runtime beyond nushell. The trade is that a
+script is holding long-lived state, which is normally a job for a compiled
+program. Revisions on every write, WAL mode, and a narrow command surface keep
+that contained.
+
 ## Where the state lives
 
 `.data/contexts.db`, plus its `-wal` and `-shm` files while open. Copy the
